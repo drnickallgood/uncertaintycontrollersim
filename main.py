@@ -43,7 +43,7 @@ def execute_attempt(delta, m, v, Q, dt,
 
 # SChedudling
 
-def run_fixed_baseline(seed=42):
+def run_fixed_baseline(seed=42, n_attempts=8):
     rng = np.random.default_rng(seed)
 
     # Simulation parameters
@@ -55,6 +55,10 @@ def run_fixed_baseline(seed=42):
     p_h = 0.25
     F_min = 0.95
     fidelity_failures = 0
+    predicted_violations = 0
+    reliability_sum = 0.0
+    measurements = 0
+    calibrations = 0
 
     # Initial state
     t = 0.0
@@ -66,64 +70,225 @@ def run_fixed_baseline(seed=42):
     heralds = 0
     useful_pairs = 0
 
-    schedule = ["measure", "calibrate"] + ["attempt"] * 8
+    #schedule = ["measure", "calibrate"] + ["attempt"] * 8
+    #schedule = ["measure", "calibrate", "measure"] + ["attempt"] * 8
+    schedule = ["measure", "calibrate", "measure"] + (["attempt"] * n_attempts)
+
+
+    action_index = 0
 
     while t < T_end:
-        for action in schedule:
 
-            dt = {
-                "measure": 5.0,
-                "calibrate": 15.0,
-                "attempt": 10.0
-            }[action]
+        action = schedule[action_index]
 
-            if t + dt > T_end:
-                break
+        dt = {
+            "measure": 5.0,
+            "calibrate": 15.0,
+            "attempt": 10.0
+        }[action]
 
-            if action == "measure":
-                delta, m, v = advance_state(
-                    delta, m, v, Q, dt, rng
-                )
-                y, m, v = measure_and_update(
-                    delta, m, v, r, rng
-                )
+        # Never execute an action past the deadline
+        if t + dt > T_end:
+            break
 
-            elif action == "calibrate":
-                delta, m, v = calibrate(
-                    delta, m, v, Q, dt, a, rng
-                )
+        if action == "measure":
+            delta, m, v = advance_state(
+                delta, m, v, Q, dt, rng
+            )
+            y, m, v = measure_and_update(
+                delta, m, v, r, rng
+            )
+            measurements += 1
 
+        elif action == "calibrate":
+            delta, m, v = calibrate(
+                delta, m, v, Q, dt, a, rng
+            )
+            calibrations += 1
 
-            elif action == "attempt":
-                delta, m, v, heralded, F, useful = (
-                    execute_attempt(
-                        delta, m, v, Q, dt,
-                        sigma, p_h, F_min, rng
-                    )
-                )
+        elif action == "attempt":
+            reliability = predicted_reliability(
+                m, v, Q, dt, sigma, F_min
+            )
 
-                attempts += 1
-                heralds += int(heralded)
-                useful_pairs += int(useful)
+            reliability_sum += reliability
 
-                if heralded and not useful:
-                    fidelity_failures += 1
+            if reliability < 0.99:
+                predicted_violations += 1
 
-            t += dt
+            delta, m, v, heralded, F, useful = execute_attempt(
+                delta, m, v, Q, dt,
+                sigma, p_h, F_min, rng
+            )
+
+            attempts += 1
+            heralds += int(heralded)
+            useful_pairs += int(useful)
+
+            if heralded and not useful:
+                fidelity_failures += 1
+
+        # Advance time exactly once per action
+        t += dt
+
+        # Move to next action, wrapping each cycle
+        action_index = (action_index + 1) % len(schedule)
 
         if t >= T_end:
             break
 
     throughput = useful_pairs / (T_end * 1e-6)
+    assert t <= T_end + 1e-9
+    assert heralds == useful_pairs + fidelity_failures
 
     return {
         "attempts": attempts,
         "heralds": heralds,
         "useful_pairs": useful_pairs,
         "throughput_pairs_per_sec": throughput,
-        "fidelity_failures": fidelity_failures
+        "fidelity_failures": fidelity_failures,
+        "predicted_violations": predicted_violations,
+        "mean_predicted_reliability": (
+            reliability_sum / attempts if attempts else 0.0),
+        "measurements": measurements,
+        "calibrations": calibrations,
+        "elapsed_us": t
     }
 
+
+def run_gated_fixed(seed=42, n_attempts=8,
+                    reliability_target=0.99):
+
+    rng = np.random.default_rng(seed)
+
+    # Same physical parameters as other controllers
+    T_end = 1000.0
+    Q = 0.09
+    r = 2.0
+    a = 2.0
+    sigma = 10.0
+    p_h = 0.25
+    F_min = 0.95
+
+    # Initial state
+    t = 0.0
+    delta = 5.0
+    m = 4.0
+    v = 4.0
+
+    # Counters
+    attempts = 0
+    heralds = 0
+    useful_pairs = 0
+    fidelity_failures = 0
+
+    measurements = 0
+    calibrations = 0
+    skipped_attempts = 0
+    constraint_violations = 0
+    reliability_sum = 0.0
+
+    # Fixed maintenance schedule
+    schedule = (
+        ["measure", "calibrate", "measure"]
+        + ["attempt"] * n_attempts
+    )
+
+    action_index = 0
+
+    while t < T_end:
+
+        action = schedule[action_index]
+
+        dt = {
+            "measure": 5.0,
+            "calibrate": 15.0,
+            "attempt": 10.0
+        }[action]
+
+        if t + dt > T_end:
+            break
+
+        if action == "measure":
+
+            delta, m, v = advance_state(
+                delta, m, v, Q, dt, rng
+            )
+
+            y, m, v = measure_and_update(
+                delta, m, v, r, rng
+            )
+
+            measurements += 1
+
+        elif action == "calibrate":
+
+            delta, m, v = calibrate(
+                delta, m, v, Q, dt, a, rng
+            )
+
+            calibrations += 1
+
+        elif action == "attempt":
+
+            reliability = predicted_reliability(
+                m, v, Q, dt, sigma, F_min
+            )
+
+            if reliability >= reliability_target:
+
+                (
+                    delta, m, v,
+                    heralded, F, useful
+                ) = execute_attempt(
+                    delta, m, v, Q, dt,
+                    sigma, p_h, F_min, rng
+                )
+
+                attempts += 1
+                heralds += int(heralded)
+                useful_pairs += int(useful)
+                reliability_sum += reliability
+
+                if heralded and not useful:
+                    fidelity_failures += 1
+
+                if reliability < reliability_target:
+                    constraint_violations += 1
+
+            else:
+                # Slot is skipped, but the physical link
+                # still drifts and the clock advances.
+                delta, m, v = advance_state(
+                    delta, m, v, Q, dt, rng
+                )
+
+                skipped_attempts += 1
+
+        t += dt
+        action_index = (action_index + 1) % len(schedule)
+
+    throughput = useful_pairs / (T_end * 1e-6)
+
+    assert t <= T_end + 1e-9
+    assert heralds == useful_pairs + fidelity_failures
+
+    return {
+        "attempts": attempts,
+        "heralds": heralds,
+        "useful_pairs": useful_pairs,
+        "fidelity_failures": fidelity_failures,
+        "measurements": measurements,
+        "calibrations": calibrations,
+        "skipped_attempts": skipped_attempts,
+        "constraint_violations": constraint_violations,
+        "elapsed_us": t,
+        "throughput_pairs_per_sec": throughput,
+        "mean_predicted_reliability": (
+            reliability_sum / attempts
+            if attempts else float("nan")
+        )
+    }
 
 
 
@@ -366,6 +531,229 @@ def run_adaptive(seed=42, reliability_target=0.99):
     }
 
 
+def run_reactive_fixed(seed=42, n_attempts=8,
+                       reliability_target=0.99):
+    rng = np.random.default_rng(seed)
+
+    # Same physical model
+    T_end = 1000.0
+    Q = 0.09
+    r = 2.0
+    a = 2.0
+    sigma = 10.0
+    p_h = 0.25
+    F_min = 0.95
+
+    durations = {
+        "measure": 5.0,
+        "calibrate": 15.0,
+        "attempt": 10.0
+    }
+
+    # Same initial conditions
+    t = 0.0
+    delta = 5.0
+    m = 4.0
+    v = 4.0
+
+    attempts = 0
+    heralds = 0
+    useful_pairs = 0
+    fidelity_failures = 0
+    measurements = 0
+    calibrations = 0
+    skipped_slots = 0
+    rejected_slots = 0
+    recovery_actions = 0
+    constraint_violations = 0
+
+    # Normal operation follows a periodic schedule.
+    schedule = (
+        ["measure", "calibrate", "measure"]
+        + ["attempt"] * n_attempts
+    )
+
+    action_index = 0
+    in_recovery = False
+    measure_after_calibration = False
+    recovery_streak = 0
+    max_recovery = 8
+
+    while t < T_end:
+
+        scheduled_action = schedule[action_index]
+
+        # --------------------------------------
+        # Select action
+        # --------------------------------------
+
+        if in_recovery:
+
+            if recovery_streak >= max_recovery:
+                # Give up on this attempt slot.
+                # Advance time and drift normally.
+                dt = durations["attempt"]
+
+                if t + dt > T_end:
+                    break
+
+                delta, m, v = advance_state(
+                    delta, m, v, Q, dt, rng
+                )
+
+                t += dt
+                skipped_slots += 1
+
+                in_recovery = False
+                measure_after_calibration = False
+                recovery_streak = 0
+
+                action_index = (
+                    action_index + 1
+                ) % len(schedule)
+
+                continue
+
+            if measure_after_calibration:
+                action = "measure"
+
+            else:
+                reliability = predicted_reliability(
+                    m, v, Q,
+                    durations["attempt"],
+                    sigma, F_min
+                )
+
+                if reliability >= reliability_target:
+                    # Recovery succeeded.
+                    in_recovery = False
+                    recovery_streak = 0
+                    continue
+
+                if (
+                    abs(m) >= 3.0
+                    and abs(m) >= 1.5 * np.sqrt(v)
+                ):
+                    action = "calibrate"
+                else:
+                    action = "measure"
+
+        else:
+            action = scheduled_action
+
+            # Check admission before a scheduled
+            # entanglement attempt.
+            if action == "attempt":
+
+                reliability = predicted_reliability(
+                    m, v, Q,
+                    durations["attempt"],
+                    sigma, F_min
+                )
+
+                if reliability < reliability_target:
+                    rejected_slots += 1
+                    in_recovery = True
+                    recovery_streak = 0
+                    continue
+
+        dt = durations[action]
+
+        if t + dt > T_end:
+            break
+
+        # --------------------------------------
+        # Execute action
+        # --------------------------------------
+
+        if action == "measure":
+
+            delta, m, v = advance_state(
+                delta, m, v, Q, dt, rng
+            )
+
+            _, m, v = measure_and_update(
+                delta, m, v, r, rng
+            )
+
+            measurements += 1
+
+            if in_recovery:
+                recovery_actions += 1
+                recovery_streak += 1
+                measure_after_calibration = False
+
+        elif action == "calibrate":
+
+            delta, m, v = calibrate(
+                delta, m, v, Q, dt, a, rng
+            )
+
+            calibrations += 1
+
+            if in_recovery:
+                recovery_actions += 1
+                recovery_streak += 1
+                measure_after_calibration = True
+
+        elif action == "attempt":
+
+            reliability = predicted_reliability(
+                m, v, Q, dt, sigma, F_min
+            )
+
+            if reliability < reliability_target:
+                constraint_violations += 1
+                raise RuntimeError(
+                    "Inadmissible entanglement attempt"
+                )
+
+            delta, m, v, heralded, F, useful = (
+                execute_attempt(
+                    delta, m, v, Q, dt,
+                    sigma, p_h, F_min, rng
+                )
+            )
+
+            attempts += 1
+            heralds += int(heralded)
+            useful_pairs += int(useful)
+
+            if heralded and not useful:
+                fidelity_failures += 1
+
+        t += dt
+
+        # Advance normal schedule only when
+        # its scheduled action was completed.
+        # Recovery actions leave the slot pending.
+        if not in_recovery:
+            action_index = (
+                action_index + 1
+            ) % len(schedule)
+
+    throughput = useful_pairs / (T_end * 1e-6)
+
+    assert t <= T_end + 1e-9
+    assert heralds == useful_pairs + fidelity_failures
+    assert constraint_violations == 0
+
+    return {
+        "attempts": attempts,
+        "heralds": heralds,
+        "useful_pairs": useful_pairs,
+        "fidelity_failures": fidelity_failures,
+        "measurements": measurements,
+        "calibrations": calibrations,
+        "rejected_slots": rejected_slots,
+        "skipped_slots": skipped_slots,
+        "recovery_actions": recovery_actions,
+        "constraint_violations": constraint_violations,
+        "elapsed_us": t,
+        "throughput_pairs_per_sec": throughput
+    }
+
+
 def evaluate_baseline(n_runs=1000):
     results = [
         run_fixed_baseline(seed=i)
@@ -503,7 +891,156 @@ def compare_controllers(n_runs=1000):
         n_runs
     )
 
-if __name__ == "__main__":
-    compare_controllers(n_runs=1000)
+    violations = np.array([
+        r["predicted_violations"]
+        for r in fixed_results
+    ])
 
+    reliabilities = np.array([
+        r["mean_predicted_reliability"]
+        for r in fixed_results
+    ])
+
+    print("\nFIXED BASELINE RELIABILITY AUDIT")
+
+    print(f"Mean predicted violations/run: {violations.mean():.2f}")
+
+    print(
+        f"Fraction of attempts below 99%: "
+        f"{violations.sum() / sum(r["attempts"] for r in fixed_results)}"
+
+
+    )
+
+    print(
+        f"Mean predicted reliability: "
+        f"{reliabilities.mean():.2%}"
+    )
+
+def sweep_fixed_schedules(n_runs=1000):
+    print("\nFIXED SCHEDULE SWEEP")
+    print("-" * 75)
+
+    for n in [2, 4, 6, 8, 10]:
+        results = [
+            run_fixed_baseline(seed=i, n_attempts=n)
+            for i in range(n_runs)
+        ]
+
+        throughput = np.mean([
+            r["throughput_pairs_per_sec"] for r in results
+        ])
+
+        total_violations = sum(
+            r["predicted_violations"] for r in results
+        )
+
+        total_attempts = sum(
+            r["attempts"] for r in results
+        )
+
+        violation_rate = total_violations / total_attempts
+
+        print(
+            f"Attempts/cycle={n:2d}  "
+            f"Throughput={throughput:9.2f}/s  "
+            f"Violation rate={violation_rate:7.2%}"
+        )
+
+
+def sweep_gated_fixed(n_runs=1000):
+    print("\nRELIABILITY-GATED FIXED SCHEDULE SWEEP")
+    print("-" * 90)
+
+    for n in [2, 4, 6, 8, 10]:
+        results = [
+            run_gated_fixed(
+                seed=i,
+                n_attempts=n,
+                reliability_target=0.99
+            )
+            for i in range(n_runs)
+        ]
+
+        throughput = np.mean([
+            x["throughput_pairs_per_sec"]
+            for x in results
+        ])
+
+        attempts = sum(x["attempts"] for x in results)
+        skipped = sum(x["skipped_attempts"] for x in results)
+        slots = attempts + skipped
+
+        skip_fraction = skipped / slots if slots else 0
+
+        failures = sum(
+            x["fidelity_failures"] for x in results
+        )
+
+        heralds = sum(x["heralds"] for x in results)
+
+        failure_fraction = (
+            failures / heralds if heralds else 0
+        )
+
+        print(
+            f"n={n:2d}  "
+            f"Throughput={throughput:9.2f}/s  "
+            f"Attempts/run={attempts/n_runs:6.2f}  "
+            f"Skipped={skip_fraction:7.2%}  "
+            f"Fidelity failures={failure_fraction:7.2%}"
+        )
+
+
+def sweep_reactive_fixed(n_runs=1000):
+
+    print("\nREACTIVE PERIODIC BASELINE SWEEP")
+    print("-" * 90)
+
+    #for n in [2, 4, 6, 8, 10]:
+    for n in [10, 15, 20, 30, 50, 100]:
+
+        results = [
+            run_reactive_fixed(
+                seed=i,
+                n_attempts=n,
+                reliability_target=0.99
+            )
+            for i in range(n_runs)
+        ]
+
+        def avg(key):
+            return np.mean([
+                result[key] for result in results
+            ])
+
+        print(
+            f"n={n:2d}  "
+            f"Throughput={avg('throughput_pairs_per_sec'):9.2f}/s  "
+            f"Attempts={avg('attempts'):6.2f}  "
+            f"Measurements={avg('measurements'):6.2f}  "
+            f"Calibrations={avg('calibrations'):6.2f}  "
+            f"Recovery={avg('recovery_actions'):6.2f}  "
+            f"Skipped={avg('skipped_slots'):6.2f}"
+        )
+
+    print("\nADAPTIVE V3 REFERENCE")
+
+    adaptive = [
+        run_adaptive(seed=i, reliability_target=0.99)
+        for i in range(n_runs)
+    ]
+
+    print(
+        "Throughput:",
+        np.mean([
+            result["throughput_pairs_per_sec"]
+            for result in adaptive
+        ])
+    )
+
+#print(run_fixed_baseline(seed=42))
+
+if __name__ == "__main__":
+    sweep_reactive_fixed(n_runs=1000)
 
