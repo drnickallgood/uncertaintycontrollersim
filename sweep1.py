@@ -317,13 +317,14 @@ def predicted_reliability(m, v, Q, dt, sigma, F_min):
 
 
 
-def run_adaptive(seed=42, reliability_target=0.99):
+#def run_adaptive(seed=42, reliability_target=0.99):
+def run_adaptive(seed=42, reliability_target=0.99, Q=0.09, r=2.0):
     rng = np.random.default_rng(seed)
 
     # Physical parameters: unchanged
     T_end = 1000.0
-    Q = 0.09
-    r = 2.0
+    #Q = 0.09
+    #r = 2.0
     a = 2.0
     sigma = 10.0
     p_h = 0.25
@@ -531,14 +532,14 @@ def run_adaptive(seed=42, reliability_target=0.99):
     }
 
 
-def run_reactive_fixed(seed=42, n_attempts=8,
-                       reliability_target=0.99):
+#def run_reactive_fixed(seed=42, n_attempts=8,reliability_target=0.99):
+def run_reactive_fixed(seed=42, n_attempts=100, reliability_target=0.99, Q=0.09, r=2.0):
     rng = np.random.default_rng(seed)
 
     # Same physical model
     T_end = 1000.0
-    Q = 0.09
-    r = 2.0
+    #Q = 0.09
+    #r = 2.0
     a = 2.0
     sigma = 10.0
     p_h = 0.25
@@ -1039,8 +1040,125 @@ def sweep_reactive_fixed(n_runs=1000):
         ])
     )
 
-#print(run_fixed_baseline(seed=42))
+
+def compare_statistically(n_runs=1000):
+    reactive = np.array([
+        run_reactive_fixed(seed=i, n_attempts=100)[
+            "throughput_pairs_per_sec"
+        ]
+        for i in range(n_runs)
+    ])
+
+    adaptive = np.array([
+        run_adaptive(seed=i)[
+            "throughput_pairs_per_sec"
+        ]
+        for i in range(n_runs)
+    ])
+
+    # Compare sample means
+    mean_reactive = reactive.mean()
+    mean_adaptive = adaptive.mean()
+
+    # Difference across matching seed indices
+    differences = adaptive - reactive
+    mean_diff = differences.mean()
+
+    # Sample variability and standard error
+    std_diff = differences.std(ddof=1)
+    se_diff = std_diff / np.sqrt(n_runs)
+
+    ci_lower = mean_diff - 1.96 * se_diff
+    ci_upper = mean_diff + 1.96 * se_diff
+
+    print("\nSTATISTICAL COMPARISON")
+    print("-" * 55)
+    print(f"Reactive mean:     {mean_reactive:.2f}")
+    print(f"Adaptive mean:     {mean_adaptive:.2f}")
+    print(f"Mean difference:   {mean_diff:.2f}")
+    print(f"Std difference:    {std_diff:.2f}")
+    print(f"95% CI difference: [{ci_lower:.2f}, {ci_upper:.2f}]")
+    print(
+        f"Relative difference: "
+        f"{100 * mean_diff / mean_reactive:.2f}%"
+    )
+
+
+def sweep_drift_rates(n_runs=1000):
+    Q_values = [0.25, 0.30, 0.35, 0.40, 0.42, 0.44, 0.46, 0.48, 0.50]
+
+    print("\nDRIFT-RATE SENSITIVITY")
+    print("-" * 88)
+    print(
+        f"{'Q':>7} {'Reactive':>12} {'Adaptive':>12} "
+        f"{'Difference':>12} {'95% CI':>30}"
+    )
+
+    for Q in Q_values:
+        reactive = np.array([
+            run_reactive_fixed(
+                seed=i, n_attempts=100, Q=Q
+            )["throughput_pairs_per_sec"]
+            for i in range(n_runs)
+        ])
+
+        adaptive = np.array([
+            run_adaptive(
+                seed=i, Q=Q
+            )["throughput_pairs_per_sec"]
+            for i in range(n_runs)
+        ])
+
+        differences = adaptive - reactive
+        mean_diff = differences.mean()
+        se = differences.std(ddof=1) / np.sqrt(n_runs)
+
+        lower = mean_diff - 1.96 * se
+        upper = mean_diff + 1.96 * se
+
+        print(
+            f"{Q:7.2f} "
+            f"{reactive.mean():12.2f} "
+            f"{adaptive.mean():12.2f} "
+            f"{mean_diff:12.2f} "
+            f"[{lower:9.2f}, {upper:9.2f}]"
+        )
+
+
+def sweep_sensor_precision(n_runs=1000):
+    r_values = [1.0, 2.0, 3.0, 4.0]
+    Q_values = np.arange(0.05, 0.81, 0.05)
+
+    print("\nSENSOR PRECISION AND DRIFT SWEEP")
+    print("-" * 75)
+    print(
+        f"{'r (ps)':>8} {'Q':>8} "
+        f"{'Reactive/s':>14} {'Adaptive/s':>14}"
+    )
+
+    for r in r_values:
+        for Q in Q_values:
+            reactive = [
+                run_reactive_fixed(
+                    seed=i, n_attempts=100, Q=Q, r=r
+                )["throughput_pairs_per_sec"]
+                for i in range(n_runs)
+            ]
+
+            adaptive = [
+                run_adaptive(
+                    seed=i, Q=Q, r=r
+                )["throughput_pairs_per_sec"]
+                for i in range(n_runs)
+            ]
+
+            print(
+                f"{r:8.2f} {Q:8.2f} "
+                f"{np.mean(reactive):14.2f} "
+                f"{np.mean(adaptive):14.2f}"
+            )
+
 
 if __name__ == "__main__":
-    sweep_reactive_fixed(n_runs=1000)
+    sweep_sensor_precision(n_runs=1000)
 
