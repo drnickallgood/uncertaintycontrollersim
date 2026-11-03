@@ -1,0 +1,4 @@
+group,parameter,value,q,sensor_std,t_measure,t_attempt,pairs_required,completed,trials,completion_pct,all_actual_good,mean_us,p50_us,p95_us,p99_us,deadline_us,deadline_completion_pct,mean_attempts,mean_measurements,mean_calibrations
+attempt,t_attempt,5.0,0.4,2.0,5.0,5.0,3,1000,1000,100.0,987,272.71,225.0,680.0,975.1499999999999,1000.0,99.1,12.227,22.187,6.174
+attempt,t_attempt,10.0,0.4,2.0,5.0,10.0,3,999,1000,99.9,976,1343.3033033033032,1200.0,2885.4999999999995,3760.899999999999,1000.0,38.5,12.29,126.589,30.785
+attempt,t_attempt,20.0,0.4,2.0,5.0,20.0,3,0,1000,0.0,0,nan,nan,nan,nan,1000.0,0.0,0.0,508.61,113.293
